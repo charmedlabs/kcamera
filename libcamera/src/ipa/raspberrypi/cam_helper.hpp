@@ -1,0 +1,106 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
+/*
+ * Copyright (C) 2019, Raspberry Pi (Trading) Limited
+ *
+ * cam_helper.hpp - helper class providing camera information
+ */
+#pragma once
+
+#include <string>
+
+#include "camera_mode.h"
+#include "md_parser.hpp"
+
+#include "libcamera/internal/v4l2_videodevice.h"
+
+namespace RPiController {
+
+// The CamHelper class provides a number of facilities that anyone trying
+// trying to drive a camera will need to know, but which are not provided by
+// by the standard driver framework. Specifically, it provides:
+//
+// A "CameraMode" structure to describe extra information about the chosen
+// mode of the driver. For example, how it is cropped from the full sensor
+// area, how it is scaled, whether pixels are averaged compared to the full
+// resolution.
+//
+// The ability to convert between number of lines of exposure and actual
+// exposure time, and to convert between the sensor's gain codes and actual
+// gains.
+//
+// A method to return the number of frames of delay between updating exposure,
+// analogue gain and vblanking, and for the changes to take effect. For many
+// sensors these take the values 2, 1 and 2 respectively, but sensors that are
+// different will need to over-ride the default method provided.
+//
+// A method to query if the sensor outputs embedded data that can be parsed.
+//
+// A parser to parse the metadata buffers provided by some sensors (for
+// example, the imx219 does; the ov5647 doesn't). This allows us to know for
+// sure the exposure and gain of the frame we're looking at. CamHelper
+// provides methods for converting analogue gains to and from the sensor's
+// native gain codes.
+//
+// Finally, a set of methods that determine how to handle the vagaries of
+// different camera modules on start-up or when switching modes. Some
+// modules may produce one or more frames that are not yet correctly exposed,
+// or where the metadata may be suspect. We have the following methods:
+// HideFramesStartup(): Tell the pipeline handler not to return this many
+//     frames at start-up. This can also be used to hide initial frames
+//     while the AGC and other algorithms are sorting themselves out.
+// HideFramesModeSwitch(): Tell the pipeline handler not to return this
+//     many frames after a mode switch (other than start-up). Some sensors
+//     may produce innvalid frames after a mode switch; others may not.
+// MistrustFramesStartup(): At start-up a sensor may return frames for
+//    which we should not run any control algorithms (for example, metadata
+//    may be invalid).
+// MistrustFramesModeSwitch(): The number of frames, after a mode switch
+//    (other than start-up), for which control algorithms should not run
+//    (for example, metadata may be unreliable).
+
+class CamHelper
+{
+public:
+	static CamHelper *Create(std::string const &cam_name);
+	CamHelper(MdParser *parser, unsigned int frameIntegrationDiff);
+	virtual ~CamHelper();
+	void SetCameraMode(const CameraMode &mode);
+	MdParser &Parser() const { return *parser_; }
+	uint32_t ExposureLines(double exposure_us) const;
+	double Exposure(uint32_t exposure_lines) const; // in us
+	virtual uint32_t GetVBlanking(double &exposure_us, double minFrameDuration,
+				      double maxFrameDuration) const;
+	virtual uint32_t GainCode(double gain) const = 0;
+	virtual double Gain(uint32_t gain_code) const = 0;
+	virtual void GetDelays(int &exposure_delay, int &gain_delay,
+			       int &vblank_delay) const;
+	virtual bool SensorEmbeddedDataPresent() const;
+	virtual unsigned int HideFramesStartup() const;
+	virtual unsigned int HideFramesModeSwitch() const;
+	virtual unsigned int MistrustFramesStartup() const;
+	virtual unsigned int MistrustFramesModeSwitch() const;
+
+protected:
+	MdParser *parser_;
+	CameraMode mode_;
+
+private:
+	bool initialized_;
+	/*
+	 * Smallest difference between the frame length and integration time,
+	 * in units of lines.
+	 */
+	unsigned int frameIntegrationDiff_;
+};
+
+// This is for registering camera helpers with the system, so that the
+// CamHelper::Create function picks them up automatically.
+
+typedef CamHelper *(*CamHelperCreateFunc)();
+struct RegisterCamHelper
+{
+	RegisterCamHelper(char const *cam_name,
+			  CamHelperCreateFunc create_func);
+};
+
+} // namespace RPi

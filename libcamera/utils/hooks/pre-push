@@ -1,0 +1,82 @@
+#!/bin/sh
+
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# A hook script to prevent pushing unsuitable commits to the master branch.
+# Unsuitable commits are commits that contain a local changelog below a '---'
+# line. The criteria may get extended later.
+#
+# Information about the commits which are being pushed is supplied as lines to
+# the standard input in the form:
+#
+#   <local ref> <local sha1> <remote ref> <remote sha1>
+
+z40=0000000000000000000000000000000000000000
+
+while read -r local_ref local_sha remote_ref remote_sha
+do
+	if [ "$remote_ref" != refs/heads/master ]
+	then
+		continue
+	fi
+
+	# The remote master branch should never get deleted by this push, so we
+	# can assume that local_sha is not 0's. We may however be creating the
+	# remote branch, when pushing to a new empty repository for instance.
+	if [ "$remote_sha" = $z40 ]
+	then
+		# New branch, examine all commits
+		range="$local_sha"
+	else
+		# Update to existing branch, examine new commits
+		range="$remote_sha..$local_sha"
+	fi
+
+	#
+	# Find invalid commits.
+	#
+	errors=0
+	for commit in $(git rev-list "$range")
+	do
+		msg=$(git cat-file commit "$commit")
+
+		# 1. The commit message shall not contain a local changelog.
+		if echo "$msg" | grep -q '^--- *$'
+		then
+			echo >&2 "Found local changelog in commit $commit"
+			errors=$((errors+1))
+		fi
+
+		# 2. The commit message shall have a Signed-off-by line
+		# corresponding the committer.
+		committer=$(echo "$msg" | grep '^committer ' | head -1 | \
+				cut -d ' ' -f 2- | rev | cut -d ' ' -f 3- | rev)
+		if ! echo "$msg" | grep -F -q "Signed-off-by: ${committer}"
+		then
+			echo >&2 "Missing committer Signed-off-by in commit $commit"
+			errors=$((errors+1))
+		fi
+
+		# 3. A Reviewed-by or Acked-by is required.
+		if ! echo "$msg" | grep -q '^\(Reviewed\|Acked\)-by: '
+		then
+			echo >&2 "No Reviewed-by or Acked-by in commit $commit"
+			errors=$((errors+1))
+		fi
+
+		# 4. The commit message shall not contain a Change-Id.
+		if echo "$msg" | grep -q '^Change-Id:'
+		then
+			echo >&2 "Found Change-Id in commit $commit"
+			errors=$((errors+1))
+		fi
+	done
+
+	if [ $errors != 0 ]
+	then
+		echo >&2 "Found $errors errors in $local_ref, not pushing"
+		exit 1
+	fi
+done
+
+exit 0
